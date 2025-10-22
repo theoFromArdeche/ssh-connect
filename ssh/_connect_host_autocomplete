@@ -1,0 +1,36 @@
+#!/bin/bash
+
+_connect_host_autocomplete() {
+  local cur prev words cword
+  _init_completion || return
+
+  local hosts
+  hosts=$(awk '/^Host / {for(i=2;i<=NF;i++) print $i}' ~/.ssh/config)
+  local all_opts="--vnc --ports"
+
+  if [[ ${cword} -eq 1 ]]; then
+    COMPREPLY=( $(compgen -W "$hosts" -- "$cur") )
+  else
+    local used_opts=""
+    for ((i=1; i < ${#words[@]}; i++)); do
+      if [[ ${words[i]} == --* ]]; then
+        used_opts+=" ${words[i]}"
+      fi
+    done
+
+    local available_opts=""
+    for opt in $all_opts; do
+      if ! [[ " $used_opts " =~ " $opt " ]]; then
+        available_opts+=" $opt"
+      fi
+    done
+
+    if [[ ${prev} == "--ports" ]]; then
+      COMPREPLY=()
+    else
+      COMPREPLY=( $(compgen -W "$available_opts" -- "$cur") )
+    fi
+  fi
+}
+
+complete -F _connect_host_autocomplete connect_host

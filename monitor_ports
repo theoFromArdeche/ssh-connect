@@ -1,0 +1,45 @@
+#!/bin/bash
+
+# Usage: ./monitor_ports.sh <host> <port1> <port2> ...
+# Continuously monitor the given host ports for open/close events.
+
+HOST="$1"
+shift
+PORTS=("$@")
+declare -A PORT_STATUS
+
+check_port() {
+  local port=$1
+  timeout 2 nc -z "$HOST" "$port" &>/dev/null
+  local result=$?
+
+  if [[ $result -eq 0 ]]; then
+    return 0    # port open
+  elif [[ $result -eq 124 ]]; then
+    return 124  # timeout
+  else
+    return $result   # connection refused or other failure
+  fi
+}
+
+while true; do
+  for port in "${PORTS[@]}"; do
+    check_port "$port"
+    NEW_STATUS=$?
+    OLD_STATUS="${PORT_STATUS[$port]}"
+
+    if [[ "$OLD_STATUS" != "$NEW_STATUS" ]]; then
+      if [[ $NEW_STATUS -eq 0 ]]; then
+        echo -e "\033[0;32m[+] $HOST:$port is now OPEN\033[0m"
+      elif [[ $NEW_STATUS -eq 124 ]]; then
+        echo -e "\033[0;33m[!] $HOST:$port check TIMED OUT (not reachable)\033[0m"
+      elif [[ $NEW_STATUS -eq 1 ]]; then
+        echo -e "\033[0;31m[-] $HOST:$port is now CLOSED (connection refused)\033[0m"
+      else
+        echo -e "\033[0;31m[-] $HOST:$port is now CLOSED (error code: $NEW_STATUS)\033[0m"
+      fi
+      PORT_STATUS["$port"]=$NEW_STATUS
+    fi
+  done
+  sleep 1
+done

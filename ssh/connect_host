@@ -1,0 +1,173 @@
+#!/bin/bash
+
+
+SSH_CUSTOM_LOG=~/bin/ssh/ssh_custom.log
+SSH_LOG=~/bin/ssh/ssh.log
+
+: > "$SSH_CUSTOM_LOG"
+: > "$SSH_LOG"
+
+
+ssh_custom_log() {
+  local timestamp msg plain_msg
+  timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+  msg="$1"
+  plain_msg=$(echo -e "$msg" | sed 's/\x1b\[[0-9;]*m//g')  # remove ANSI color codes
+
+  echo -e "[$timestamp] $msg"          # Colored output to terminal
+  echo "[$timestamp] $plain_msg" >> "$SSH_CUSTOM_LOG"  # Plain output to log
+}
+
+
+
+PIPE_LOG=$(mktemp -u)
+mkfifo "$PIPE_LOG"
+
+# Start logger in background to read from the pipe_log and timestamp lines
+while IFS= read -r line; do
+  echo "[$(date '+%Y-%m-%d %H:%M:%S')] $line" >> "$SSH_LOG"
+done < "$PIPE_LOG" &
+
+
+PIPE_CUSTOM_LOG=$(mktemp -u)
+mkfifo "$PIPE_CUSTOM_LOG"
+
+# Start logger in background to read from the pipe_custom_log and timestamp lines
+while IFS= read -r line; do
+  ssh_custom_log "$line"
+done < "$PIPE_CUSTOM_LOG" &
+
+
+
+
+if [ -z "$1" ]; then
+  ssh_custom_log "\e[1;31mUsage: $0 <host> [--vnc] [--ports port1 port2 ...]\e[0m"
+  exit 1
+fi
+
+TARGET_HOST="$1"
+shift
+
+USE_VNC=false
+VNC_PORT=5901
+PORTS=()
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --vnc)
+      if [ "$USE_VNC" = false ]; then
+        USE_VNC=true
+        PORTS+=("$VNC_PORT")
+      fi
+      shift
+      ;;
+    --ports)
+      shift
+      while [[ $# -gt 0 && ! "$1" == --* ]]; do
+        PORTS+=("$1")
+        shift
+      done
+      ;;
+    *)
+      ssh_custom_log "\e[1;31mUnknown argument: $1\e[0m"
+      exit 1
+      ;;
+  esac
+done
+
+if [ ${#PORTS[@]} -eq 0 ]; then
+  ssh_custom_log "\e[1;33mWarning: No ports specified for monitoring.\e[0m"
+fi
+
+FORWARDING=""
+for PORT in "${PORTS[@]}"; do
+  FORWARDING+="-L ${PORT}:localhost:${PORT} "
+done
+
+ssh_custom_log "\e[0;32mStarting SSH tunnel to $TARGET_HOST with ports: ${PORTS[*]}\e[0m"
+
+# Start SSH in background, capture its PID and redirect both stdout and stderr to the pipe_log
+ssh -N $FORWARDING "$TARGET_HOST" > "$PIPE_LOG" 2>&1 &
+SSH_PID=$!
+
+
+cleanup_flag=0
+cleanup() {
+  if [ $cleanup_flag -eq 1 ]; then return; fi
+  cleanup_flag=1
+  if [ "$USE_VNC" = true ]; then
+    ssh_custom_log "\e[1;33mCleaning up SSH tunnel and VNC viewer...\e[0m"
+  else
+    ssh_custom_log "\e[1;33mCleaning up SSH tunnel...\e[0m"
+  fi
+  
+
+  # Kill SSH process if it's still running
+  if [[ -n "$SSH_PID" && $(ps -p $SSH_PID -o comm= 2>/dev/null) == "ssh" ]]; then
+    kill "$SSH_PID"
+  fi
+
+  # Kill VNC viewer if it was launched and is still running
+  if [[ "$USE_VNC" = true && -n "$VNC_PID" && $(ps -p $VNC_PID -o comm= 2>/dev/null) == "vncviewer" ]]; then
+    kill "$VNC_PID"
+  fi
+
+  # Kill monitor_ports if it's still running
+  if [[ -n "$MONITOR_LOCAL_PID" && $(ps -p $MONITOR_LOCAL_PID -o comm= 2>/dev/null) == "monitor_ports" ]]; then
+    kill "$MONITOR_LOCAL_PID"
+  fi
+  if [[ -n "$MONITOR_REMOTE_PID" && $(ps -p $MONITOR_REMOTE_PID -o comm= 2>/dev/null) == "monitor_ports" ]]; then
+    kill "$MONITOR_REMOTE_PID"
+  fi
+
+  # Remove the pipe_log if it exists
+  if [[ -n "$PIPE_LOG" && -p "$PIPE_LOG" ]]; then
+    rm -f "$PIPE_LOG"
+  fi
+  # Remove the pipe_custom_log if it exists
+  if [[ -n "$PIPE_CUSTOM_LOG" && -p "$PIPE_CUSTOM_LOG" ]]; then
+    rm -f "$PIPE_CUSTOM_LOG"
+  fi
+
+  exit
+}
+
+trap cleanup SIGINT SIGTERM EXIT
+
+
+
+# Start monitor_ports with custom logging
+monitor_ports "localhost" "${PORTS[@]}" > "$PIPE_CUSTOM_LOG" 2>&1 &
+MONITOR_LOCAL_PID=$!
+
+monitor_ports "$TARGET_HOST" "${PORTS[@]}" > "$PIPE_CUSTOM_LOG" 2>&1 &
+MONITOR_REMOTE_PID=$!
+
+
+FLAG_TUNNEL_ACTIVE=false
+
+# Wait for any of the specified ports to open
+for PORT in "${PORTS[@]}"; do
+  for i in {1..20}; do
+    if nc -z localhost "$PORT" 2>/dev/null; then
+      ssh_custom_log "\e[0;32mSSH tunnel is now active.\e[0m"
+      FLAG_TUNNEL_ACTIVE=true
+      break 2  # Exit both inner and outer loops
+    fi
+    sleep 0.5
+  done
+done
+
+# Handle the result of port check
+if [ "$FLAG_TUNNEL_ACTIVE" = true ]; then
+  if [ "$USE_VNC" = true ]; then
+    vncviewer "localhost:$VNC_PORT" &
+    VNC_PID=$!
+    wait $VNC_PID
+  else
+    wait $SSH_PID
+  fi
+fi
+
+cleanup
+
