@@ -1,12 +1,10 @@
 #!/bin/bash
 
-
 SSH_CUSTOM_LOG=~/bin/ssh/ssh_custom.log
 SSH_LOG=~/bin/ssh/ssh.log
 
 : > "$SSH_CUSTOM_LOG"
 : > "$SSH_LOG"
-
 
 ssh_custom_log() {
   local timestamp msg plain_msg
@@ -17,7 +15,6 @@ ssh_custom_log() {
   echo -e "[$timestamp] $msg"          # Colored output to terminal
   echo "[$timestamp] $plain_msg" >> "$SSH_CUSTOM_LOG"  # Plain output to log
 }
-
 
 
 PIPE_LOG=$(mktemp -u)
@@ -38,6 +35,13 @@ while IFS= read -r line; do
 done < "$PIPE_CUSTOM_LOG" &
 
 
+PIPE_CUSTOM_LOG_MONITOR=$(mktemp -u)
+mkfifo "$PIPE_CUSTOM_LOG_MONITOR"
+
+# Start logger in background to read from the PIPE_CUSTOM_LOG_MONITOR and timestamp lines
+while IFS= read -r line; do
+  ssh_custom_log "$line"
+done < "$PIPE_CUSTOM_LOG_MONITOR" &
 
 
 if [ -z "$1" ]; then
@@ -85,7 +89,6 @@ for PORT in "${PORTS[@]}"; do
 done
 
 ssh_custom_log "\e[0;32mStarting SSH tunnel to $TARGET_HOST with ports: ${PORTS[*]}\e[0m"
-
 # Start SSH in background, capture its PID and redirect both stdout and stderr to the pipe_log
 ssh -N $FORWARDING "$TARGET_HOST" > "$PIPE_LOG" 2>&1 &
 SSH_PID=$!
@@ -101,7 +104,6 @@ cleanup() {
     ssh_custom_log "\e[1;33mCleaning up SSH tunnel...\e[0m"
   fi
   
-
   # Kill SSH process if it's still running
   if [[ -n "$SSH_PID" && $(ps -p $SSH_PID -o comm= 2>/dev/null) == "ssh" ]]; then
     kill "$SSH_PID"
@@ -129,23 +131,26 @@ cleanup() {
     rm -f "$PIPE_CUSTOM_LOG"
   fi
 
+  # Remove the PIPE_CUSTOM_LOG_MONITOR if it exists
+  if [[ -n "$PIPE_CUSTOM_LOG_MONITOR" && -p "$PIPE_CUSTOM_LOG_MONITOR" ]]; then
+    rm -f "$PIPE_CUSTOM_LOG_MONITOR"
+  fi
+
   exit
 }
 
 trap cleanup SIGINT SIGTERM EXIT
 
 
-
 # Start monitor_ports with custom logging
-monitor_ports "localhost" "${PORTS[@]}" > "$PIPE_CUSTOM_LOG" 2>&1 &
+monitor_ports "localhost" "${PORTS[@]}" > "$PIPE_CUSTOM_LOG_MONITOR" 2>&1 &
 MONITOR_LOCAL_PID=$!
 
-monitor_ports "$TARGET_HOST" "${PORTS[@]}" > "$PIPE_CUSTOM_LOG" 2>&1 &
+monitor_ports "$TARGET_HOST" "${PORTS[@]}" > "$PIPE_CUSTOM_LOG_MONITOR" 2>&1 &
 MONITOR_REMOTE_PID=$!
 
 
 FLAG_TUNNEL_ACTIVE=false
-
 # Wait for any of the specified ports to open
 for PORT in "${PORTS[@]}"; do
   for i in {1..20}; do
@@ -168,6 +173,7 @@ if [ "$FLAG_TUNNEL_ACTIVE" = true ]; then
     wait $SSH_PID
   fi
 fi
+
 
 cleanup
 
