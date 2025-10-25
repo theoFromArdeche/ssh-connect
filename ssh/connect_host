@@ -142,14 +142,6 @@ cleanup() {
 trap cleanup SIGINT SIGTERM EXIT
 
 
-# Start monitor_ports with custom logging
-monitor_ports "localhost" "${PORTS[@]}" > "$PIPE_CUSTOM_LOG_MONITOR" 2>&1 &
-MONITOR_LOCAL_PID=$!
-
-monitor_ports "$TARGET_HOST" "${PORTS[@]}" > "$PIPE_CUSTOM_LOG_MONITOR" 2>&1 &
-MONITOR_REMOTE_PID=$!
-
-
 FLAG_TUNNEL_ACTIVE=false
 # Wait for any of the specified ports to open
 for PORT in "${PORTS[@]}"; do
@@ -165,6 +157,13 @@ done
 
 # Handle the result of port check
 if [ "$FLAG_TUNNEL_ACTIVE" = true ]; then
+  # Start monitor_ports with custom logging
+  monitor_ports "localhost" "${PORTS[@]}" > "$PIPE_CUSTOM_LOG_MONITOR" 2>&1 &
+  MONITOR_LOCAL_PID=$!
+
+  monitor_ports "$TARGET_HOST" "${PORTS[@]}" > "$PIPE_CUSTOM_LOG_MONITOR" 2>&1 &
+  MONITOR_REMOTE_PID=$!
+  
   if [ "$USE_VNC" = true ]; then
     vncviewer "localhost:$VNC_PORT" &
     VNC_PID=$!
