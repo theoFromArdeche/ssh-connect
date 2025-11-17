@@ -158,6 +158,15 @@ done
 # Handle the result of port check
 if [ "$FLAG_TUNNEL_ACTIVE" = true ]; then
   # Start monitor_ports with custom logging
+
+  VNC_PID=0
+  if [ "$USE_VNC" = true ]; then
+    vncviewer "localhost:$VNC_PORT" &
+    VNC_PID=$!
+  fi
+
+  sleep 5
+  
   monitor_ports "localhost" "${PORTS[@]}" > "$PIPE_CUSTOM_LOG_MONITOR" 2>&1 &
   MONITOR_LOCAL_PID=$!
 
@@ -165,8 +174,6 @@ if [ "$FLAG_TUNNEL_ACTIVE" = true ]; then
   MONITOR_REMOTE_PID=$!
   
   if [ "$USE_VNC" = true ]; then
-    vncviewer "localhost:$VNC_PORT" &
-    VNC_PID=$!
     wait $VNC_PID
   else
     wait $SSH_PID
