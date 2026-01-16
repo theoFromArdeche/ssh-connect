@@ -3,6 +3,9 @@
 SSH_CUSTOM_LOG=~/bin/ssh/ssh_custom.log
 SSH_LOG=~/bin/ssh/ssh.log
 
+# Ensure directories exist
+mkdir -p ~/bin/ssh
+
 : > "$SSH_CUSTOM_LOG"
 : > "$SSH_LOG"
 
@@ -10,39 +13,36 @@ ssh_custom_log() {
   local timestamp msg plain_msg
   timestamp=$(date '+%Y-%m-%d %H:%M:%S')
   msg="$1"
-  plain_msg=$(echo -e "$msg" | sed 's/\x1b\[[0-9;]*m//g')  # remove ANSI color codes
+  plain_msg=$(echo -e "$msg" | sed 's/\x1b\[[0-9;]*m//g')
 
-  echo -e "[$timestamp] $msg"          # Colored output to terminal
-  echo "[$timestamp] $plain_msg" >> "$SSH_CUSTOM_LOG"  # Plain output to log
+  echo -e "[$timestamp] $msg"
+  echo "[$timestamp] $plain_msg" >> "$SSH_CUSTOM_LOG"
 }
 
-
+# Create named pipes
 PIPE_LOG=$(mktemp -u)
 mkfifo "$PIPE_LOG"
 
-# Start logger in background to read from the pipe_log and timestamp lines
 while IFS= read -r line; do
   echo "[$(date '+%Y-%m-%d %H:%M:%S')] $line" >> "$SSH_LOG"
 done < "$PIPE_LOG" &
-
+PIPE_LOG_PID=$!
 
 PIPE_CUSTOM_LOG=$(mktemp -u)
 mkfifo "$PIPE_CUSTOM_LOG"
 
-# Start logger in background to read from the pipe_custom_log and timestamp lines
 while IFS= read -r line; do
   ssh_custom_log "$line"
 done < "$PIPE_CUSTOM_LOG" &
-
+PIPE_CUSTOM_LOG_PID=$!
 
 PIPE_CUSTOM_LOG_MONITOR=$(mktemp -u)
 mkfifo "$PIPE_CUSTOM_LOG_MONITOR"
 
-# Start logger in background to read from the PIPE_CUSTOM_LOG_MONITOR and timestamp lines
 while IFS= read -r line; do
   ssh_custom_log "$line"
 done < "$PIPE_CUSTOM_LOG_MONITOR" &
-
+PIPE_CUSTOM_LOG_MONITOR_PID=$!
 
 if [ -z "$1" ]; then
   ssh_custom_log "\e[1;31mUsage: $0 <host> [--vnc] [--ports port1 port2 ...]\e[0m"
@@ -89,97 +89,83 @@ for PORT in "${PORTS[@]}"; do
 done
 
 ssh_custom_log "\e[0;32mStarting SSH tunnel to $TARGET_HOST with ports: ${PORTS[*]}\e[0m"
-# Start SSH in background, capture its PID and redirect both stdout and stderr to the pipe_log
+
 ssh -N $FORWARDING "$TARGET_HOST" > "$PIPE_LOG" 2>&1 &
 SSH_PID=$!
 
+# Initialize PIDs
+VNC_PID=""
+MONITOR_LOCAL_PID=""
 
 cleanup_flag=0
 cleanup() {
   if [ $cleanup_flag -eq 1 ]; then return; fi
   cleanup_flag=1
+  
   if [ "$USE_VNC" = true ]; then
     ssh_custom_log "\e[1;33mCleaning up SSH tunnel and VNC viewer...\e[0m"
   else
     ssh_custom_log "\e[1;33mCleaning up SSH tunnel...\e[0m"
   fi
   
-  # Kill SSH process if it's still running
-  if [[ -n "$SSH_PID" && $(ps -p $SSH_PID -o comm= 2>/dev/null) == "ssh" ]]; then
-    kill "$SSH_PID"
+  # Kill VNC viewer
+  if [[ "$USE_VNC" = true && -n "$VNC_PID" ]] && kill -0 "$VNC_PID" 2>/dev/null; then
+    kill "$VNC_PID" 2>/dev/null
   fi
 
-  # Kill VNC viewer if it was launched and is still running
-  if [[ "$USE_VNC" = true && -n "$VNC_PID" && $(ps -p $VNC_PID -o comm= 2>/dev/null) == "vncviewer" ]]; then
-    kill "$VNC_PID"
+  # Kill monitor_ports
+  if [[ -n "$MONITOR_LOCAL_PID" ]] && kill -0 "$MONITOR_LOCAL_PID" 2>/dev/null; then
+    kill "$MONITOR_LOCAL_PID" 2>/dev/null
   fi
 
-  # Kill monitor_ports if it's still running
-  if [[ -n "$MONITOR_LOCAL_PID" && $(ps -p $MONITOR_LOCAL_PID -o comm= 2>/dev/null) == "monitor_ports" ]]; then
-    kill "$MONITOR_LOCAL_PID"
-  fi
-  if [[ -n "$MONITOR_REMOTE_PID" && $(ps -p $MONITOR_REMOTE_PID -o comm= 2>/dev/null) == "monitor_ports" ]]; then
-    kill "$MONITOR_REMOTE_PID"
+  # Kill SSH
+  if [[ -n "$SSH_PID" ]] && kill -0 "$SSH_PID" 2>/dev/null; then
+    kill "$SSH_PID" 2>/dev/null
   fi
 
-  # Remove the pipe_log if it exists
-  if [[ -n "$PIPE_LOG" && -p "$PIPE_LOG" ]]; then
-    rm -f "$PIPE_LOG"
-  fi
-  # Remove the pipe_custom_log if it exists
-  if [[ -n "$PIPE_CUSTOM_LOG" && -p "$PIPE_CUSTOM_LOG" ]]; then
-    rm -f "$PIPE_CUSTOM_LOG"
-  fi
+  # Kill logger processes
+  kill "$PIPE_LOG_PID" "$PIPE_CUSTOM_LOG_PID" "$PIPE_CUSTOM_LOG_MONITOR_PID" 2>/dev/null
 
-  # Remove the PIPE_CUSTOM_LOG_MONITOR if it exists
-  if [[ -n "$PIPE_CUSTOM_LOG_MONITOR" && -p "$PIPE_CUSTOM_LOG_MONITOR" ]]; then
-    rm -f "$PIPE_CUSTOM_LOG_MONITOR"
-  fi
+  # Remove pipes
+  rm -f "$PIPE_LOG" "$PIPE_CUSTOM_LOG" "$PIPE_CUSTOM_LOG_MONITOR" 2>/dev/null
 
-  exit
+  exit 0
 }
 
 trap cleanup SIGINT SIGTERM EXIT
 
-
 FLAG_TUNNEL_ACTIVE=false
-# Wait for any of the specified ports to open
+
 for PORT in "${PORTS[@]}"; do
   for i in {1..20}; do
-    if nc -z localhost "$PORT" 2>/dev/null; then
+    # Use ss instead of nc -z to avoid triggering VNC blacklist
+    # ss reads kernel socket table without making a TCP connection
+    if ss -tln "sport = :$PORT" 2>/dev/null | grep -q "LISTEN"; then
       ssh_custom_log "\e[0;32mSSH tunnel is now active.\e[0m"
       FLAG_TUNNEL_ACTIVE=true
-      break 2  # Exit both inner and outer loops
+      break 2
     fi
     sleep 0.5
   done
 done
 
-# Handle the result of port check
 if [ "$FLAG_TUNNEL_ACTIVE" = true ]; then
-  # Start monitor_ports with custom logging
-
-  VNC_PID=0
   if [ "$USE_VNC" = true ]; then
     vncviewer "localhost:$VNC_PORT" &
     VNC_PID=$!
   fi
 
-  sleep 5
-  
+  # ONLY monitor local ports - no remote monitoring
   monitor_ports "localhost" "${PORTS[@]}" > "$PIPE_CUSTOM_LOG_MONITOR" 2>&1 &
   MONITOR_LOCAL_PID=$!
-
-  monitor_ports "$TARGET_HOST" "${PORTS[@]}" > "$PIPE_CUSTOM_LOG_MONITOR" 2>&1 &
-  MONITOR_REMOTE_PID=$!
   
   if [ "$USE_VNC" = true ]; then
     wait $VNC_PID
   else
     wait $SSH_PID
   fi
+else
+  ssh_custom_log "\e[1;31mFailed to establish SSH tunnel.\e[0m"
 fi
 
-
 cleanup
-

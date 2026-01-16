@@ -1,42 +1,65 @@
 #!/bin/bash
+# Usage: ./monitor_ports <host> <port1> <port2> ...
+#
+# Monitors if ports are open WITHOUT making TCP connections.
+# Uses 'ss' to check listening state (for localhost) which doesn't
+# trigger VNC "too many security failures" blacklisting.
 
-# Usage: ./monitor_ports.sh <host> <port1> <port2> ...
-# Continuously monitor the given host ports for open/close events.
+if [[ $# -lt 2 ]]; then
+  echo "Usage: $0 <host> <port1> [port2] ..."
+  exit 1
+fi
 
 HOST="$1"
 shift
 PORTS=("$@")
+
 declare -A PORT_STATUS
 
 check_port() {
   local port=$1
-  timeout 2 nc -z "$HOST" "$port" &>/dev/null
-  local result=$?
-
-  if [[ $result -eq 0 ]]; then
-    return 0    # port open
-  elif [[ $result -eq 124 ]]; then
-    return 124  # timeout
+  
+  if [[ "$HOST" == "localhost" || "$HOST" == "127.0.0.1" || "$HOST" == "::1" ]]; then
+    # For localhost: use 'ss' to check if something is LISTENING on the port
+    # This does NOT make a connection - just reads kernel socket table
+    ss -tln "sport = :$port" 2>/dev/null | grep -q "LISTEN"
+    return $?
   else
-    return $result   # connection refused or other failure
+    # For remote hosts: we have no choice but to use nc
+    # But this should only be used for non-VNC ports or through SSH
+    timeout 2 nc -z "$HOST" "$port" &>/dev/null
+    return $?
   fi
 }
 
+echo -e "\033[0;36m[*] Monitoring $HOST ports: ${PORTS[*]} (using ss - no TCP connections)\033[0m"
+
+# Initialize and show initial status
+for port in "${PORTS[@]}"; do
+  check_port "$port"
+  status=$?
+  PORT_STATUS["$port"]=$status
+  
+  # Show initial status
+  if [[ $status -eq 0 ]]; then
+    echo -e "\033[0;32m[+] $HOST:$port is OPEN\033[0m"
+  else
+    echo -e "\033[0;31m[-] $HOST:$port is CLOSED\033[0m"
+  fi
+done
+
+# Monitor for changes
 while true; do
   for port in "${PORTS[@]}"; do
     check_port "$port"
     NEW_STATUS=$?
     OLD_STATUS="${PORT_STATUS[$port]}"
-
+    
     if [[ "$OLD_STATUS" != "$NEW_STATUS" ]]; then
       if [[ $NEW_STATUS -eq 0 ]]; then
         echo -e "\033[0;32m[+] $HOST:$port is now OPEN\033[0m"
-      elif [[ $NEW_STATUS -eq 124 ]]; then
-        echo -e "\033[0;33m[!] $HOST:$port check TIMED OUT (not reachable)\033[0m"
-      elif [[ $NEW_STATUS -eq 1 ]]; then
-        echo -e "\033[0;31m[-] $HOST:$port is now CLOSED (connection refused)\033[0m"
       else
-        echo -e "\033[0;31m[-] $HOST:$port is now CLOSED (error code: $NEW_STATUS)\033[0m"
+        echo -e "\033[0;31m[-] $HOST:$port is now CLOSED\033[0m"
       fi
       PORT_STATUS["$port"]=$NEW_STATUS
     fi
